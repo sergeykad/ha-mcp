@@ -169,12 +169,13 @@ class TestDashboardResourceLifecycle:
 
             await asyncio.sleep(1)
 
-            # Verify by_type categorization
+            # Verify resources are listed
             list_data = await mcp.call_tool_success(
                 "ha_config_list_dashboard_resources", {}
             )
-            assert "by_type" in list_data
-            logger.info(f"Resources by type: {list_data['by_type']}")
+            assert "resources" in list_data
+            assert "count" in list_data
+            logger.info(f"Listed {list_data['count']} resources")
 
         finally:
             # Cleanup created resources
@@ -316,17 +317,12 @@ class TestDashboardResourceList:
         assert list_data["action"] == "list"
         assert "resources" in list_data
         assert "count" in list_data
-        assert "by_type" in list_data
         assert "note" in list_data
 
-        # Verify by_type structure
-        by_type = list_data["by_type"]
-        assert "module" in by_type
-        assert "js" in by_type
-        assert "css" in by_type
-
-        # All by_type values should be integers
-        assert all(isinstance(v, int) for v in by_type.values())
+        # Verify resources is a list and count matches
+        assert isinstance(list_data["resources"], list)
+        assert isinstance(list_data["count"], int)
+        assert list_data["count"] == len(list_data["resources"])
 
         logger.info("List resources structure test completed successfully")
 
