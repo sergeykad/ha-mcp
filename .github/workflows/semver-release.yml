@@ -61,6 +61,9 @@ jobs:
     if: needs.check-changes.outputs.has_changes == 'true'
     name: Semantic Release
     runs-on: ubuntu-latest
+    outputs:
+      released: ${{ steps.semantic.outputs.released }}
+      version: ${{ steps.semantic.outputs.version }}
     permissions:
       contents: write      # Required to push commits and tags
       id-token: write      # Required for trusted publishing
@@ -68,19 +71,53 @@ jobs:
       issues: write        # Required for GitHub releases
 
     steps:
+    # Generate GitHub App token with bypass permissions for tag creation
+    - name: Generate GitHub App token
+      id: app-token
+      uses: actions/create-github-app-token@v2
+      with:
+        app-id: ${{ secrets.RELEASE_APP_ID }}
+        private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+      # Fallback to RELEASE_TOKEN (PAT) or GITHUB_TOKEN if app credentials not configured
+      continue-on-error: true
+
     - uses: actions/checkout@v6
       with:
         fetch-depth: 0
-        token: ${{ secrets.GITHUB_TOKEN }}
+        # Priority: GitHub App token > RELEASE_TOKEN (PAT) > GITHUB_TOKEN
+        token: ${{ steps.app-token.outputs.token || secrets.RELEASE_TOKEN || secrets.GITHUB_TOKEN }}
 
     - name: Python Semantic Release
       id: semantic
-      uses: python-semantic-release/python-semantic-release@v10.5.2
+      uses: python-semantic-release/python-semantic-release@v10.5.3
       with:
-        github_token: ${{ secrets.GITHUB_TOKEN }}
+        # Use GitHub App token with bypass permissions
+        github_token: ${{ steps.app-token.outputs.token || secrets.RELEASE_TOKEN || secrets.GITHUB_TOKEN }}
         verbosity: "2"
-        # Don't create GitHub release here - build-binary.yml will create it with binaries
+        # Don't create GitHub release here - we'll create a draft below
         vcs_release: "false"
+
+    - name: Create draft GitHub release
+      if: steps.semantic.outputs.released == 'true'
+      env:
+        GH_TOKEN: ${{ steps.app-token.outputs.token || secrets.RELEASE_TOKEN || secrets.GITHUB_TOKEN }}
+      run: |
+        VERSION="${{ steps.semantic.outputs.version }}"
+        TAG="v${VERSION}"
+
+        # Extract changelog for this version
+        awk "/^## v${VERSION}/,/^## v[0-9]/" CHANGELOG.md | head -n -1 > release_notes.md
+        if [ ! -s release_notes.md ]; then
+          echo "Release v${VERSION}" > release_notes.md
+        fi
+
+        # Create draft release (build-binary.yml will add binaries and publish)
+        gh release create "$TAG" \
+          --title "$TAG" \
+          --notes-file release_notes.md \
+          --draft
+
+        echo "✓ Created draft release $TAG (waiting for binaries)"
 
     - name: Copy changelog to addon directory
       if: steps.semantic.outputs.released == 'true'
@@ -109,3 +146,14 @@ jobs:
         git push origin stable
 
         echo "✓ 'stable' tag now points to v$VERSION"
+
+  # Build binaries and attach to release
+  build-and-release:
+    needs: semantic-release
+    if: needs.semantic-release.outputs.released == 'true'
+    uses: ./.github/workflows/_build-and-release.yml
+    with:
+      release_tag: v${{ needs.semantic-release.outputs.version }}
+      is_prerelease: false
+    permissions:
+      contents: write

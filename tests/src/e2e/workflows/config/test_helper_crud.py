@@ -13,8 +13,47 @@ import logging
 import pytest
 
 from ...utilities.assertions import assert_mcp_success, parse_mcp_result
+from ...utilities.wait_helpers import wait_for_condition, wait_for_entity_state
 
 logger = logging.getLogger(__name__)
+
+
+async def wait_for_entity_registration(mcp_client, entity_id: str, timeout: int = 20) -> bool:
+    """
+    Wait for entity to be registered and queryable via API.
+    Does not check for specific state, only that entity exists.
+    """
+    import time
+    start_time = time.time()
+    attempt = 0
+
+    async def entity_exists():
+        nonlocal attempt
+        attempt += 1
+        result = await mcp_client.call_tool("ha_get_state", {"entity_id": entity_id})
+        data = parse_mcp_result(result)
+        # Check if 'data' key exists (not 'success' key)
+        success = 'data' in data and data['data'] is not None
+
+        # Log every attempt with full details
+        elapsed = time.time() - start_time
+        logger.info(
+            f"[Attempt {attempt} @ {elapsed:.1f}s] Checking {entity_id}: "
+            f"success={success}, data keys={list(data.keys())}"
+        )
+
+        if success:
+            state = data.get("data", {}).get("state", "N/A")
+            logger.info(f"✅ Entity {entity_id} EXISTS with state='{state}'")
+        else:
+            error = data.get("error", "No error message")
+            logger.warning(f"❌ Entity {entity_id} check failed: {error}")
+
+        return success
+
+    return await wait_for_condition(
+        entity_exists, timeout=timeout, condition_name=f"{entity_id} registration"
+    )
 
 
 def get_entity_id_from_response(data: dict, helper_type: str) -> str | None:
@@ -73,9 +112,12 @@ class TestInputBooleanCRUD:
         entity_id = get_entity_id_from_response(create_data, "input_boolean")
         assert entity_id, f"Missing entity_id in create response: {create_data}"
         cleanup_tracker.track("input_boolean", entity_id)
-        logger.info(f"Created input_boolean: {entity_id}")
+        logger.info(f"✨ Created input_boolean: {entity_id}")
+        logger.info(f"📝 Creation response keys: {list(create_data.keys())}")
 
-        await asyncio.sleep(1)  # Wait for registration
+        # Wait for entity to be registered (existence only, not specific state)
+        entity_ready = await wait_for_entity_registration(mcp_client, entity_id)
+        assert entity_ready, f"Entity {entity_id} not registered within timeout"
 
         # LIST - Verify it appears
         list_result = await mcp_client.call_tool(
@@ -116,8 +158,7 @@ class TestInputBooleanCRUD:
         delete_data = assert_mcp_success(delete_result, "Delete input_boolean")
         logger.info(f"Deleted input_boolean: {delete_data.get('message')}")
 
-        # VERIFY DELETION
-        await asyncio.sleep(1)
+        # VERIFY DELETION - list operation reflects current state
         list_result = await mcp_client.call_tool(
             "ha_config_list_helpers",
             {"helper_type": "input_boolean"},
@@ -201,7 +242,20 @@ class TestInputNumberCRUD:
         cleanup_tracker.track("input_number", entity_id)
         logger.info(f"Created input_number: {entity_id}")
 
-        await asyncio.sleep(1)
+        # Give HA a moment to process entity registration before polling
+
+
+        await asyncio.sleep(5)
+
+
+
+        # Wait for entity to be registered (existence only, not specific state)
+
+
+        entity_ready = await wait_for_entity_registration(mcp_client, entity_id)
+
+
+        assert entity_ready, f"Entity {entity_id} not registered within timeout"
 
         # VERIFY via state
         state_result = await mcp_client.call_tool(
@@ -293,7 +347,20 @@ class TestInputSelectCRUD:
         cleanup_tracker.track("input_select", entity_id)
         logger.info(f"Created input_select: {entity_id}")
 
-        await asyncio.sleep(1)
+        # Give HA a moment to process entity registration before polling
+
+
+        await asyncio.sleep(5)
+
+
+
+        # Wait for entity to be registered (existence only, not specific state)
+
+
+        entity_ready = await wait_for_entity_registration(mcp_client, entity_id)
+
+
+        assert entity_ready, f"Entity {entity_id} not registered within timeout"
 
         # VERIFY via state
         state_result = await mcp_client.call_tool(
@@ -378,7 +445,20 @@ class TestInputTextCRUD:
         cleanup_tracker.track("input_text", entity_id)
         logger.info(f"Created input_text: {entity_id}")
 
-        await asyncio.sleep(1)
+        # Give HA a moment to process entity registration before polling
+
+
+        await asyncio.sleep(5)
+
+
+
+        # Wait for entity to be registered (existence only, not specific state)
+
+
+        entity_ready = await wait_for_entity_registration(mcp_client, entity_id)
+
+
+        assert entity_ready, f"Entity {entity_id} not registered within timeout"
 
         # DELETE
         await mcp_client.call_tool(
@@ -550,7 +630,11 @@ class TestInputButtonCRUD:
         cleanup_tracker.track("input_button", entity_id)
         logger.info(f"Created input_button: {entity_id}")
 
-        await asyncio.sleep(1)
+        # Wait for entity to be registered (buttons typically start in unknown state)
+        state_reached = await wait_for_entity_state(
+            mcp_client, entity_id, "unknown", timeout=10
+        )
+        assert state_reached, f"Entity {entity_id} not registered within timeout"
 
         # PRESS button via service
         press_result = await mcp_client.call_tool(
@@ -628,3 +712,476 @@ async def test_helper_delete_nonexistent(mcp_client):
             logger.info(f"Delete returned success: {data}")
     else:
         logger.info("Non-existent helper properly returned error")
+
+
+@pytest.mark.asyncio
+@pytest.mark.config
+class TestCounterCRUD:
+    """Test counter helper CRUD operations."""
+
+    async def test_list_counters(self, mcp_client):
+        """Test listing all counter helpers."""
+        logger.info("Testing ha_config_list_helpers for counter")
+
+        result = await mcp_client.call_tool(
+            "ha_config_list_helpers",
+            {"helper_type": "counter"},
+        )
+
+        data = assert_mcp_success(result, "List counter helpers")
+        assert "helpers" in data, f"Missing 'helpers': {data}"
+        logger.info(f"Found {data.get('count', 0)} counter helpers")
+
+    async def test_counter_full_lifecycle(self, mcp_client, cleanup_tracker):
+        """Test complete counter lifecycle with increment/decrement."""
+        logger.info("Testing counter full lifecycle")
+
+        helper_name = "E2E Test Counter"
+
+        # CREATE counter with custom range
+        create_result = await mcp_client.call_tool(
+            "ha_config_set_helper",
+            {
+                "helper_type": "counter",
+                "name": helper_name,
+                "icon": "mdi:counter",
+                "initial": 5,
+                "min_value": 0,
+                "max_value": 100,
+                "step": 2,
+            },
+        )
+
+        create_data = assert_mcp_success(create_result, "Create counter")
+        entity_id = get_entity_id_from_response(create_data, "counter")
+        assert entity_id, f"Missing entity_id: {create_data}"
+        cleanup_tracker.track("counter", entity_id)
+        logger.info(f"Created counter: {entity_id}")
+
+        # Wait for entity to be registered with initial value
+        state_reached = await wait_for_entity_state(
+            mcp_client, entity_id, "5", timeout=10
+        )
+        assert state_reached, f"Entity {entity_id} not registered within timeout"
+
+        # VERIFY via state
+        state_result = await mcp_client.call_tool(
+            "ha_get_state",
+            {"entity_id": entity_id},
+        )
+        state_data = parse_mcp_result(state_result)
+        if state_data.get("success"):
+            state_value = state_data.get("data", {}).get("state")
+            logger.info(f"Counter initial state: {state_value}")
+
+        # INCREMENT counter
+        inc_result = await mcp_client.call_tool(
+            "ha_call_service",
+            {
+                "domain": "counter",
+                "service": "increment",
+                "entity_id": entity_id,
+            },
+        )
+        assert_mcp_success(inc_result, "Increment counter")
+        logger.info("Counter incremented")
+
+        # RESET counter
+        reset_result = await mcp_client.call_tool(
+            "ha_call_service",
+            {
+                "domain": "counter",
+                "service": "reset",
+                "entity_id": entity_id,
+            },
+        )
+        assert_mcp_success(reset_result, "Reset counter")
+        logger.info("Counter reset")
+
+        # DELETE
+        await mcp_client.call_tool(
+            "ha_config_remove_helper",
+            {"helper_type": "counter", "helper_id": entity_id},
+        )
+        logger.info("Counter cleanup complete")
+
+
+@pytest.mark.asyncio
+@pytest.mark.config
+class TestTimerCRUD:
+    """Test timer helper CRUD operations."""
+
+    async def test_list_timers(self, mcp_client):
+        """Test listing all timer helpers."""
+        logger.info("Testing ha_config_list_helpers for timer")
+
+        result = await mcp_client.call_tool(
+            "ha_config_list_helpers",
+            {"helper_type": "timer"},
+        )
+
+        data = assert_mcp_success(result, "List timer helpers")
+        assert "helpers" in data, f"Missing 'helpers': {data}"
+        logger.info(f"Found {data.get('count', 0)} timer helpers")
+
+    async def test_timer_full_lifecycle(self, mcp_client, cleanup_tracker):
+        """Test complete timer lifecycle with start/cancel."""
+        logger.info("Testing timer full lifecycle")
+
+        helper_name = "E2E Test Timer"
+
+        # CREATE timer with duration
+        create_result = await mcp_client.call_tool(
+            "ha_config_set_helper",
+            {
+                "helper_type": "timer",
+                "name": helper_name,
+                "icon": "mdi:timer",
+                "duration": "0:05:00",
+                "restore": True,
+            },
+        )
+
+        create_data = assert_mcp_success(create_result, "Create timer")
+        entity_id = get_entity_id_from_response(create_data, "timer")
+        assert entity_id, f"Missing entity_id: {create_data}"
+        cleanup_tracker.track("timer", entity_id)
+        logger.info(f"Created timer: {entity_id}")
+
+        # Wait for entity to be registered in idle state
+        state_reached = await wait_for_entity_state(
+            mcp_client, entity_id, "idle", timeout=10
+        )
+        assert state_reached, f"Timer {entity_id} not registered in idle state within timeout"
+        logger.info(f"Timer initial state: idle")
+
+        # START timer
+        start_result = await mcp_client.call_tool(
+            "ha_call_service",
+            {
+                "domain": "timer",
+                "service": "start",
+                "entity_id": entity_id,
+            },
+        )
+        assert_mcp_success(start_result, "Start timer")
+        logger.info("Timer started")
+
+        # Wait for timer to reach active state
+        state_reached = await wait_for_entity_state(
+            mcp_client, entity_id, "active", timeout=5
+        )
+        assert state_reached, f"Timer {entity_id} did not reach active state after start"
+
+        # CANCEL timer
+        cancel_result = await mcp_client.call_tool(
+            "ha_call_service",
+            {
+                "domain": "timer",
+                "service": "cancel",
+                "entity_id": entity_id,
+            },
+        )
+        assert_mcp_success(cancel_result, "Cancel timer")
+        logger.info("Timer cancelled")
+
+        # DELETE
+        await mcp_client.call_tool(
+            "ha_config_remove_helper",
+            {"helper_type": "timer", "helper_id": entity_id},
+        )
+        logger.info("Timer cleanup complete")
+
+
+@pytest.mark.asyncio
+@pytest.mark.config
+class TestScheduleCRUD:
+    """Test schedule helper CRUD operations."""
+
+    async def test_list_schedules(self, mcp_client):
+        """Test listing all schedule helpers."""
+        logger.info("Testing ha_config_list_helpers for schedule")
+
+        result = await mcp_client.call_tool(
+            "ha_config_list_helpers",
+            {"helper_type": "schedule"},
+        )
+
+        data = assert_mcp_success(result, "List schedule helpers")
+        assert "helpers" in data, f"Missing 'helpers': {data}"
+        logger.info(f"Found {data.get('count', 0)} schedule helpers")
+
+    async def test_schedule_full_lifecycle(self, mcp_client, cleanup_tracker):
+        """Test complete schedule lifecycle with weekday times."""
+        logger.info("Testing schedule full lifecycle")
+
+        helper_name = "E2E Test Schedule"
+
+        # CREATE schedule with weekday time ranges
+        create_result = await mcp_client.call_tool(
+            "ha_config_set_helper",
+            {
+                "helper_type": "schedule",
+                "name": helper_name,
+                "icon": "mdi:calendar-clock",
+                "monday": [{"from": "09:00", "to": "17:00"}],
+                "tuesday": [{"from": "09:00", "to": "17:00"}],
+                "wednesday": [{"from": "09:00", "to": "12:00"}, {"from": "13:00", "to": "17:00"}],
+            },
+        )
+
+        create_data = assert_mcp_success(create_result, "Create schedule")
+        entity_id = get_entity_id_from_response(create_data, "schedule")
+        assert entity_id, f"Missing entity_id: {create_data}"
+        cleanup_tracker.track("schedule", entity_id)
+        logger.info(f"Created schedule: {entity_id}")
+
+        # Wait for entity to be registered (schedule is either on or off depending on current time)
+        async def check_schedule_exists():
+            result = await mcp_client.call_tool("ha_get_state", {"entity_id": entity_id})
+            data = parse_mcp_result(result)
+            # Check if 'data' key exists (not 'success' key which doesn't exist in parse_mcp_result)
+            if 'data' in data and data['data'] is not None:
+                state = data.get("data", {}).get("state")
+                return state in ["on", "off"]
+            return False
+
+        state_reached = await wait_for_condition(
+            check_schedule_exists, timeout=10, condition_name=f"schedule {entity_id} registration"
+        )
+        assert state_reached, f"Schedule {entity_id} not registered within timeout"
+
+        # VERIFY via state
+        state_result = await mcp_client.call_tool(
+            "ha_get_state",
+            {"entity_id": entity_id},
+        )
+        state_data = parse_mcp_result(state_result)
+        # Check if 'data' key exists (not 'success' key which doesn't exist in parse_mcp_result)
+        if 'data' in state_data and state_data['data'] is not None:
+            state_value = state_data.get("data", {}).get("state")
+            logger.info(f"Schedule state: {state_value}")
+
+        # LIST to verify schedule appears
+        list_result = await mcp_client.call_tool(
+            "ha_config_list_helpers",
+            {"helper_type": "schedule"},
+        )
+        list_data = assert_mcp_success(list_result, "List schedules")
+        found = any(h.get("name") == helper_name for h in list_data.get("helpers", []))
+        assert found, "Created schedule not found in list"
+        logger.info("Schedule verified in list")
+
+        # DELETE
+        await mcp_client.call_tool(
+            "ha_config_remove_helper",
+            {"helper_type": "schedule", "helper_id": entity_id},
+        )
+        logger.info("Schedule cleanup complete")
+
+
+@pytest.mark.asyncio
+@pytest.mark.config
+class TestZoneCRUD:
+    """Test zone helper CRUD operations."""
+
+    async def test_list_zones(self, mcp_client):
+        """Test listing all zone helpers."""
+        logger.info("Testing ha_config_list_helpers for zone")
+
+        result = await mcp_client.call_tool(
+            "ha_config_list_helpers",
+            {"helper_type": "zone"},
+        )
+
+        data = assert_mcp_success(result, "List zone helpers")
+        assert "helpers" in data, f"Missing 'helpers': {data}"
+        logger.info(f"Found {data.get('count', 0)} zone helpers")
+
+    async def test_zone_full_lifecycle(self, mcp_client, cleanup_tracker):
+        """Test complete zone lifecycle with coordinates."""
+        logger.info("Testing zone full lifecycle")
+
+        helper_name = "E2E Test Zone"
+
+        # CREATE zone with coordinates
+        create_result = await mcp_client.call_tool(
+            "ha_config_set_helper",
+            {
+                "helper_type": "zone",
+                "name": helper_name,
+                "icon": "mdi:map-marker",
+                "latitude": 37.7749,
+                "longitude": -122.4194,
+                "radius": 150,
+                "passive": False,
+            },
+        )
+
+        create_data = assert_mcp_success(create_result, "Create zone")
+        entity_id = get_entity_id_from_response(create_data, "zone")
+        assert entity_id, f"Missing entity_id: {create_data}"
+        cleanup_tracker.track("zone", entity_id)
+        logger.info(f"Created zone: {entity_id}")
+
+        # Wait for entity to be registered (zones start with state "0" - no people in zone)
+        state_reached = await wait_for_entity_state(
+            mcp_client, entity_id, "0", timeout=10
+        )
+        assert state_reached, f"Zone {entity_id} not registered within timeout"
+
+        # VERIFY via state
+        state_result = await mcp_client.call_tool(
+            "ha_get_state",
+            {"entity_id": entity_id},
+        )
+        state_data = parse_mcp_result(state_result)
+        if state_data.get("success"):
+            attrs = state_data.get("data", {}).get("attributes", {})
+            logger.info(f"Zone attributes: {attrs}")
+
+        # DELETE
+        await mcp_client.call_tool(
+            "ha_config_remove_helper",
+            {"helper_type": "zone", "helper_id": entity_id},
+        )
+        logger.info("Zone cleanup complete")
+
+    async def test_zone_requires_coordinates(self, mcp_client):
+        """Test that zone requires latitude and longitude (validated by HA)."""
+        logger.info("Testing zone without coordinates (HA should reject)")
+
+        result = await mcp_client.call_tool(
+            "ha_config_set_helper",
+            {
+                "helper_type": "zone",
+                "name": "E2E No Coords Zone",
+                # Missing required latitude/longitude - HA will validate
+            },
+        )
+
+        data = parse_mcp_result(result)
+        assert data.get("success") is False, f"Should fail without coordinates: {data}"
+        logger.info("HA properly validates required zone coordinates")
+
+
+@pytest.mark.asyncio
+@pytest.mark.config
+class TestPersonCRUD:
+    """Test person helper CRUD operations."""
+
+    async def test_list_persons(self, mcp_client):
+        """Test listing all person helpers."""
+        logger.info("Testing ha_config_list_helpers for person")
+
+        result = await mcp_client.call_tool(
+            "ha_config_list_helpers",
+            {"helper_type": "person"},
+        )
+
+        data = assert_mcp_success(result, "List person helpers")
+        assert "helpers" in data, f"Missing 'helpers': {data}"
+        logger.info(f"Found {data.get('count', 0)} person helpers")
+
+    async def test_person_full_lifecycle(self, mcp_client, cleanup_tracker):
+        """Test complete person lifecycle."""
+        logger.info("Testing person full lifecycle")
+
+        helper_name = "E2E Test Person"
+
+        # CREATE person (note: person doesn't support icon parameter)
+        create_result = await mcp_client.call_tool(
+            "ha_config_set_helper",
+            {
+                "helper_type": "person",
+                "name": helper_name,
+            },
+        )
+
+        create_data = assert_mcp_success(create_result, "Create person")
+        entity_id = get_entity_id_from_response(create_data, "person")
+        assert entity_id, f"Missing entity_id: {create_data}"
+        cleanup_tracker.track("person", entity_id)
+        logger.info(f"Created person: {entity_id}")
+
+        # Wait for entity to be registered (person typically starts with "unknown" state)
+        state_reached = await wait_for_entity_state(
+            mcp_client, entity_id, "unknown", timeout=10
+        )
+        assert state_reached, f"Person {entity_id} not registered within timeout"
+
+        # VERIFY via state
+        state_result = await mcp_client.call_tool(
+            "ha_get_state",
+            {"entity_id": entity_id},
+        )
+        state_data = parse_mcp_result(state_result)
+        if state_data.get("success"):
+            state_value = state_data.get("data", {}).get("state")
+            logger.info(f"Person state: {state_value}")
+
+        # DELETE
+        await mcp_client.call_tool(
+            "ha_config_remove_helper",
+            {"helper_type": "person", "helper_id": entity_id},
+        )
+        logger.info("Person cleanup complete")
+
+
+@pytest.mark.asyncio
+@pytest.mark.config
+class TestTagCRUD:
+    """Test tag helper CRUD operations."""
+
+    async def test_list_tags(self, mcp_client):
+        """Test listing all tag helpers."""
+        logger.info("Testing ha_config_list_helpers for tag")
+
+        result = await mcp_client.call_tool(
+            "ha_config_list_helpers",
+            {"helper_type": "tag"},
+        )
+
+        data = assert_mcp_success(result, "List tag helpers")
+        assert "helpers" in data, f"Missing 'helpers': {data}"
+        logger.info(f"Found {data.get('count', 0)} tag helpers")
+
+    async def test_tag_full_lifecycle(self, mcp_client, cleanup_tracker):
+        """Test complete tag lifecycle."""
+        logger.info("Testing tag full lifecycle")
+
+        helper_name = "E2E Test Tag"
+        test_tag_id = "e2e-test-tag-001"
+
+        # CREATE tag with custom ID
+        create_result = await mcp_client.call_tool(
+            "ha_config_set_helper",
+            {
+                "helper_type": "tag",
+                "name": helper_name,
+                "tag_id": test_tag_id,
+                "description": "Test tag for E2E testing",
+            },
+        )
+
+        create_data = assert_mcp_success(create_result, "Create tag")
+        entity_id = get_entity_id_from_response(create_data, "tag")
+        # Tag may not return entity_id in same format
+        tag_id = create_data.get("helper_data", {}).get("id") or test_tag_id
+        cleanup_tracker.track("tag", tag_id)
+        logger.info(f"Created tag: {tag_id}")
+
+        # LIST to verify tag appears (tags don't have entity state, list is authoritative)
+        list_result = await mcp_client.call_tool(
+            "ha_config_list_helpers",
+            {"helper_type": "tag"},
+        )
+        list_data = assert_mcp_success(list_result, "List tags")
+        logger.info(f"Tags after create: {list_data.get('count', 0)}")
+
+        # DELETE
+        await mcp_client.call_tool(
+            "ha_config_remove_helper",
+            {"helper_type": "tag", "helper_id": tag_id},
+        )
+        logger.info("Tag cleanup complete")

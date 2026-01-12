@@ -21,36 +21,80 @@ from .util_helpers import parse_json_param
 logger = logging.getLogger(__name__)
 
 
-def _normalize_automation_config(config: dict[str, Any]) -> dict[str, Any]:
+def _normalize_automation_config(
+    config: Any, parent_key: str | None = None, in_choose_or_if: bool = False
+) -> Any:
     """
-    Normalize automation config field names to HA API format.
+    Recursively normalize automation config field names to HA API format.
 
     Home Assistant accepts both singular ('trigger', 'action', 'condition')
     and plural ('triggers', 'actions', 'conditions') field names in YAML,
-    but the API expects singular forms. This function normalizes plural
-    to singular for consistency.
+    but the API expects singular forms at the root level.
+
+    IMPORTANT: Inside 'choose' and 'if' action blocks, the 'conditions' key
+    (plural) is required by the HA schema and should NOT be normalized to
+    'condition' (singular).
+
+    IMPORTANT: Inside compound condition blocks ('or', 'and', 'not'), the
+    'conditions' key (plural) is required and should NOT be normalized to
+    'condition' (singular).
 
     Args:
-        config: Automation configuration dict
+        config: Automation configuration (dict, list, or primitive)
+        parent_key: The parent dictionary key (for context tracking)
+        in_choose_or_if: Whether we're inside a choose/if option that requires
+                         'conditions' (plural) to remain unchanged
 
     Returns:
-        Normalized configuration with singular field names
+        Normalized configuration with singular field names at root level,
+        but preserving 'conditions' (plural) inside choose/if blocks and
+        compound condition blocks (or/and/not)
     """
+    # Handle lists - recursively process each item
+    if isinstance(config, list):
+        # If parent is 'choose' or 'if', items are options that need 'conditions' preserved
+        is_option_list = parent_key in ("choose", "if")
+        return [
+            _normalize_automation_config(item, parent_key, is_option_list)
+            for item in config
+        ]
+
+    # Handle primitives (strings, numbers, etc.)
+    if not isinstance(config, dict):
+        return config
+
+    # Process dictionary
     normalized = config.copy()
 
+    # Check if this dict is a compound condition block (or/and/not)
+    # that needs its nested 'conditions' key preserved
+    is_compound_condition_block = normalized.get("condition") in ("or", "and", "not")
+
     # Map plural field names to singular (HA API format)
+    # EXCEPT 'conditions' when inside choose/if blocks OR in compound condition blocks
     field_mappings = {
         "triggers": "trigger",
         "actions": "action",
-        "conditions": "condition",
+        # Note: 'sequence' is already singular, but some users might use 'sequences'
+        "sequences": "sequence",
     }
 
+    # Only add 'conditions' mapping if NOT inside a choose/if option
+    # AND NOT a compound condition block (or/and/not)
+    if not in_choose_or_if and not is_compound_condition_block:
+        field_mappings["conditions"] = "condition"
+
+    # Apply field mapping to current level
     for plural, singular in field_mappings.items():
         if plural in normalized and singular not in normalized:
             normalized[singular] = normalized.pop(plural)
         elif plural in normalized and singular in normalized:
             # Both exist - prefer singular, remove plural
             del normalized[plural]
+
+    # Recursively process all values in the dictionary
+    for key, value in normalized.items():
+        normalized[key] = _normalize_automation_config(value, key)
 
     return normalized
 
@@ -103,6 +147,30 @@ def _normalize_config_for_roundtrip(config: dict[str, Any]) -> dict[str, Any]:
         normalized["trigger"] = _normalize_trigger_keys(normalized["trigger"])
 
     return normalized
+
+
+def _strip_empty_automation_fields(config: dict[str, Any]) -> dict[str, Any]:
+    """
+    Strip empty trigger/action/condition arrays from automation config.
+
+    Blueprint-based automations should not have trigger/action/condition fields
+    since these come from the blueprint itself. If empty arrays are present,
+    they override the blueprint's configuration and break the automation.
+
+    Args:
+        config: Automation configuration dict
+
+    Returns:
+        Configuration with empty trigger/action/condition arrays removed
+    """
+    cleaned = config.copy()
+
+    # Remove empty arrays for blueprint automations
+    for field in ["trigger", "action", "condition"]:
+        if field in cleaned and cleaned[field] == []:
+            del cleaned[field]
+
+    return cleaned
 
 
 def register_config_automation_tools(mcp: Any, client: Any, **kwargs: Any) -> None:
@@ -195,12 +263,23 @@ def register_config_automation_tools(mcp: Any, client: Any, **kwargs: Any) -> No
 
         Creates a new automation (if identifier omitted) or updates existing automation with provided configuration.
 
-        REQUIRED CONFIG FIELDS:
+        AUTOMATION TYPES:
+
+        1. Regular Automations - Define triggers and actions directly
+        2. Blueprint Automations - Use pre-built templates with customizable inputs
+
+        REQUIRED FIELDS (Regular Automations):
         - alias: Human-readable automation name
         - trigger: List of trigger conditions (time, state, event, etc.)
         - action: List of actions to execute
 
-        OPTIONAL CONFIG FIELDS:
+        REQUIRED FIELDS (Blueprint Automations):
+        - alias: Human-readable automation name
+        - use_blueprint: Blueprint configuration
+          - path: Blueprint file path (e.g., "motion_light.yaml")
+          - input: Dictionary of input values for the blueprint
+
+        OPTIONAL CONFIG FIELDS (Regular Automations):
         - description: Detailed description of the user's intent (RECOMMENDED: helps safely modify implementation later)
         - condition: Additional conditions that must be met
         - mode: 'single' (default), 'restart', 'queued', 'parallel'
@@ -244,6 +323,37 @@ def register_config_automation_tools(mcp: Any, client: Any, **kwargs: Any) -> No
             }
         )
 
+        BLUEPRINT AUTOMATION EXAMPLES:
+
+        Create automation from blueprint:
+        ha_config_set_automation({
+            "alias": "Motion Light Kitchen",
+            "use_blueprint": {
+                "path": "homeassistant/motion_light.yaml",
+                "input": {
+                    "motion_entity": "binary_sensor.kitchen_motion",
+                    "light_target": {"entity_id": "light.kitchen"},
+                    "no_motion_wait": 120
+                }
+            }
+        })
+
+        Update blueprint automation inputs:
+        ha_config_set_automation(
+            identifier="automation.motion_light_kitchen",
+            config={
+                "alias": "Motion Light Kitchen",
+                "use_blueprint": {
+                    "path": "homeassistant/motion_light.yaml",
+                    "input": {
+                        "motion_entity": "binary_sensor.kitchen_motion",
+                        "light_target": {"entity_id": "light.kitchen"},
+                        "no_motion_wait": 300
+                    }
+                }
+            }
+        })
+
         TRIGGER TYPES: time, time_pattern, sun, state, numeric_state, event, device, zone, template, and more
         CONDITION TYPES: state, numeric_state, time, sun, template, device, zone, and more
         ACTION TYPES: service calls, delays, wait_for_trigger, wait_template, if/then/else, choose, repeat, parallel
@@ -282,8 +392,15 @@ def register_config_automation_tools(mcp: Any, client: Any, **kwargs: Any) -> No
             # Normalize field names (triggers -> trigger, actions -> action, etc.)
             config_dict = _normalize_automation_config(config_dict)
 
-            # Validate required fields
-            required_fields = ["alias", "trigger", "action"]
+            # Validate required fields based on automation type
+            # Blueprint automations only need alias, regular automations need trigger and action
+            if "use_blueprint" in config_dict:
+                required_fields = ["alias"]
+                # Strip empty trigger/action/condition arrays that would override blueprint
+                config_dict = _strip_empty_automation_fields(config_dict)
+            else:
+                required_fields = ["alias", "trigger", "action"]
+
             missing_fields = [f for f in required_fields if f not in config_dict]
             if missing_fields:
                 return create_config_error(

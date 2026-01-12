@@ -207,8 +207,13 @@ async def _run_with_graceful_shutdown() -> None:
 
     _shutdown_event = asyncio.Event()
 
+    # Respect FastMCP's show_cli_banner setting
+    # Users can disable banner via FASTMCP_SHOW_CLI_BANNER=false
+    import fastmcp
+    show_banner = fastmcp.settings.show_cli_banner
+
     # Create a task for the MCP server
-    server_task = asyncio.create_task(_get_mcp().run_async())
+    server_task = asyncio.create_task(_get_mcp().run_async(show_banner=show_banner))
 
     # Wait for either the server to complete or a shutdown signal
     shutdown_task = asyncio.create_task(_shutdown_event.wait())
@@ -255,10 +260,24 @@ async def _run_with_graceful_shutdown() -> None:
 # CLI entry point (for pyproject.toml) - use FastMCP's built-in runner
 def main() -> None:
     """Run server via CLI using FastMCP's stdio transport."""
+    # Handle --version flag early, before server creation requires config
+    if "--version" in sys.argv or "-V" in sys.argv:
+        from importlib.metadata import version
+        print(f"ha-mcp {version('ha-mcp')}")
+        sys.exit(0)
+
     # Check for smoke test flag
     if "--smoke-test" in sys.argv:
         from ha_mcp.smoke_test import main as smoke_test_main
         sys.exit(smoke_test_main())
+
+    # Configure logging before server creation
+    from ha_mcp.config import get_settings
+    settings = get_settings()
+    logging.basicConfig(
+        level=getattr(logging, settings.log_level),
+        format='%(asctime)s %(name)s %(levelname)s: %(message)s'
+    )
 
     # Set up signal handlers before running
     _setup_signal_handlers()
@@ -279,10 +298,14 @@ def main() -> None:
 
 
 # HTTP entry point for web clients
-def _get_http_runtime() -> tuple[int, str]:
-    """Return runtime configuration shared by HTTP transports."""
+def _get_http_runtime(default_port: int = 8086) -> tuple[int, str]:
+    """Return runtime configuration shared by HTTP transports.
 
-    port = int(os.getenv("MCP_PORT", "8086"))
+    Args:
+        default_port: Default port to use if MCP_PORT env var is not set.
+    """
+
+    port = int(os.getenv("MCP_PORT", str(default_port)))
     path = os.getenv("MCP_SECRET_PATH", "/mcp")
     return port, path
 
@@ -298,6 +321,11 @@ async def _run_http_with_graceful_shutdown(
 
     _shutdown_event = asyncio.Event()
 
+    # Respect FastMCP's show_cli_banner setting
+    # Users can disable banner via FASTMCP_SHOW_CLI_BANNER=false
+    import fastmcp
+    show_banner = fastmcp.settings.show_cli_banner
+
     # Create a task for the MCP server
     server_task = asyncio.create_task(
         _get_mcp().run_async(
@@ -305,6 +333,7 @@ async def _run_http_with_graceful_shutdown(
             host=host,
             port=port,
             path=path,
+            show_banner=show_banner,
         )
     )
 
@@ -350,9 +379,14 @@ async def _run_http_with_graceful_shutdown(
                     pass
 
 
-def _run_http_server(transport: str) -> None:
-    """Common runner for HTTP-based transports."""
-    port, path = _get_http_runtime()
+def _run_http_server(transport: str, default_port: int = 8086) -> None:
+    """Common runner for HTTP-based transports.
+
+    Args:
+        transport: Transport type (streamable-http or sse).
+        default_port: Default port to use if MCP_PORT env var is not set.
+    """
+    port, path = _get_http_runtime(default_port)
 
     # Set up signal handlers before running
     _setup_signal_handlers()
@@ -387,7 +421,15 @@ def main_web() -> None:
     - MCP_PORT (optional, default: 8086)
     - MCP_SECRET_PATH (optional, default: "/mcp")
     """
-    _run_http_server("streamable-http")
+    # Configure logging before server creation
+    from ha_mcp.config import get_settings
+    settings = get_settings()
+    logging.basicConfig(
+        level=getattr(logging, settings.log_level),
+        format='%(asctime)s %(name)s %(levelname)s: %(message)s'
+    )
+
+    _run_http_server("streamable-http", default_port=8086)
 
 
 def main_sse() -> None:
@@ -396,10 +438,18 @@ def main_sse() -> None:
     Environment:
     - HOMEASSISTANT_URL (required)
     - HOMEASSISTANT_TOKEN (required)
-    - MCP_PORT (optional, default: 8086)
+    - MCP_PORT (optional, default: 8087)
     - MCP_SECRET_PATH (optional, default: "/mcp")
     """
-    _run_http_server("sse")
+    # Configure logging before server creation
+    from ha_mcp.config import get_settings
+    settings = get_settings()
+    logging.basicConfig(
+        level=getattr(logging, settings.log_level),
+        format='%(asctime)s %(name)s %(levelname)s: %(message)s'
+    )
+
+    _run_http_server("sse", default_port=8087)
 
 
 if __name__ == "__main__":

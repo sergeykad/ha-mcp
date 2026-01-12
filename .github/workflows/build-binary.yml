@@ -1,11 +1,8 @@
-name: Build and Release Binaries
+name: Build Binary (Test Only)
 
+# NOTE: This workflow is for testing binary builds in PRs only.
+# For releases, use the _build-and-release.yml reusable workflow.
 on:
-  # Trigger after SemVer Release completes (creates GitHub releases)
-  workflow_run:
-    workflows: ["SemVer Release"]
-    types: [completed]
-    branches: [master]
   pull_request:
     branches: [master]
     paths:
@@ -26,11 +23,6 @@ permissions:
 
 jobs:
   build:
-    # Only run if: PR, manual dispatch, or workflow_run succeeded
-    if: >-
-      github.event_name == 'pull_request' ||
-      github.event_name == 'workflow_dispatch' ||
-      (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success')
     permissions:
       contents: read
     strategy:
@@ -55,18 +47,15 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
-        with:
-          # For workflow_run, checkout master to get the latest released code
-          ref: ${{ github.event_name == 'workflow_run' && 'master' || '' }}
+        uses: actions/checkout@v6
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: '3.13'
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v4
+        uses: astral-sh/setup-uv@v7
         with:
           version: "latest"
 
@@ -112,7 +101,7 @@ jobs:
           mv dist/ha-mcp${{ matrix.binary_ext }} dist/${{ matrix.artifact_name }}${{ matrix.binary_ext }}
 
       - name: Upload binary artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: ${{ matrix.artifact_name }}
           path: dist/${{ matrix.artifact_name }}${{ matrix.binary_ext }}
@@ -126,24 +115,21 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
-        with:
-          # For workflow_run, checkout master to get the latest released code
-          ref: ${{ github.event_name == 'workflow_run' && 'master' || '' }}
+        uses: actions/checkout@v6
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: '3.13'
 
       - name: Download Windows binary
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: ha-mcp-windows
           path: mcpb-bundle
 
       - name: Download macOS binary
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: ha-mcp-macos-arm64
           path: mcpb-bundle
@@ -151,10 +137,7 @@ jobs:
       - name: Set version
         id: version
         run: |
-          if [ "${{ github.event_name }}" = "workflow_run" ]; then
-            # Get version from pyproject.toml (just released by SemVer Release)
-            VERSION=$(grep '^version = ' pyproject.toml | sed 's/version = "\(.*\)"/\1/')
-          elif [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             VERSION="${{ github.event.inputs.version }}"
             VERSION="${VERSION:-0.0.0-dev}"
           else
@@ -200,79 +183,8 @@ jobs:
           unzip -l ha-mcp.mcpb
 
       - name: Upload mcpb artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: ha-mcp-mcpb
           path: ha-mcp.mcpb
           if-no-files-found: error
-
-  release:
-    needs: [build, create-mcpb]
-    runs-on: ubuntu-latest
-    # Only upload to release when triggered by workflow_run (after SemVer Release)
-    if: github.event_name == 'workflow_run'
-    permissions:
-      contents: write
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-        with:
-          ref: master
-
-      - name: Get release version
-        id: version
-        run: |
-          VERSION=$(grep '^version = ' pyproject.toml | sed 's/version = "\(.*\)"/\1/')
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
-          echo "Uploading binaries to release v$VERSION"
-
-      - name: Download all artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: artifacts
-
-      - name: List artifacts
-        run: find artifacts -type f
-
-      - name: Extract changelog for this version
-        id: changelog
-        run: |
-          VERSION="${{ steps.version.outputs.version }}"
-          # Extract changelog section for this version
-          # Look for ## v{version} and extract until next ## v or end
-          awk "/^## v${VERSION}/,/^## v[0-9]/" CHANGELOG.md | head -n -1 > release_notes.md
-          # If no specific section found, use a default message
-          if [ ! -s release_notes.md ]; then
-            echo "Release v${VERSION}" > release_notes.md
-          fi
-          echo "=== Release Notes ==="
-          cat release_notes.md
-
-      - name: Create or update GitHub release with binaries
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          VERSION="${{ steps.version.outputs.version }}"
-          TAG="v${VERSION}"
-
-          # Check if release already exists
-          if gh release view "$TAG" &>/dev/null; then
-            echo "Release $TAG already exists, uploading binaries to existing release..."
-            # Upload assets to existing release (handles immutable releases)
-            gh release upload "$TAG" \
-              artifacts/ha-mcp-linux/ha-mcp-linux \
-              artifacts/ha-mcp-windows/ha-mcp-windows.exe \
-              artifacts/ha-mcp-macos-arm64/ha-mcp-macos-arm64 \
-              artifacts/ha-mcp-mcpb/ha-mcp.mcpb \
-              --clobber
-          else
-            echo "Creating release $TAG with binaries..."
-            gh release create "$TAG" \
-              --title "$TAG" \
-              --notes-file release_notes.md \
-              artifacts/ha-mcp-linux/ha-mcp-linux \
-              artifacts/ha-mcp-windows/ha-mcp-windows.exe \
-              artifacts/ha-mcp-macos-arm64/ha-mcp-macos-arm64 \
-              artifacts/ha-mcp-mcpb/ha-mcp.mcpb
-          fi

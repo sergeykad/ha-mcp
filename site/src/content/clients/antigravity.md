@@ -2,16 +2,18 @@
 name: Antigravity
 company: Google
 logo: /logos/google.svg
-transports: ['stdio', 'streamable-http']
+transports: ['stdio']
 configFormat: json
 configLocation: mcp_config.json (in Antigravity UI)
-accuracy: 4
+accuracy: 3
 order: 15
 ---
 
 ## Configuration
 
 Google Antigravity supports MCP servers via the built-in MCP Store and custom configuration.
+
+> **Recommended:** Use stdio mode for reliable connectivity. HTTP mode may experience connection timeout issues.
 
 ### Accessing MCP Config
 
@@ -20,40 +22,51 @@ Google Antigravity supports MCP servers via the built-in MCP Store and custom co
 3. Click **Manage MCP Servers** at the top
 4. Click **View raw config** to edit `mcp_config.json`
 
-### stdio Configuration (Local)
+### stdio Configuration (Recommended)
 
 ```json
 {
   "mcpServers": {
-    "home-assistant": {
-      "command": "uvx",
+    "homeassistant": {
       "args": ["ha-mcp@latest"],
       "env": {
         "HOMEASSISTANT_URL": "{{HOMEASSISTANT_URL}}",
-        "HOMEASSISTANT_TOKEN": "{{HOMEASSISTANT_TOKEN}}"
+        "HOMEASSISTANT_TOKEN": "{{HOMEASSISTANT_TOKEN}}",
+        "FASTMCP_SHOW_CLI_BANNER": "false"
       }
     }
   }
 }
 ```
 
-### HTTP Configuration (Network/Remote)
+> **Note:** `FASTMCP_SHOW_CLI_BANNER=false` disables the startup banner, which prevents "Unexpected server output" errors in Antigravity.
+
+**Important:** Use absolute paths if specifying a local command. Restart the Agent session after saving.
+
+### HTTP Configuration (Experimental)
+
+> ⚠️ HTTP mode may experience "connection closed" or "SSE stream failed to reconnect" errors. Use stdio if possible.
 
 ```json
 {
   "mcpServers": {
-    "home-assistant": {
+    "homeassistant": {
       "serverUrl": "{{MCP_SERVER_URL}}"
     }
   }
 }
 ```
 
-Save and restart the Agent session after making changes.
+## Troubleshooting
+
+- **"Unexpected server output" error:** Add `"FASTMCP_SHOW_CLI_BANNER": "false"` to your env config (see example above)
+- **Tools load but fail when called:** Try stdio mode instead of HTTP
+- **"EOF" errors:** Ensure command paths are absolute, not relative
+- **First run timeout:** Run `uvx ha-mcp@latest --version` in terminal first to cache the package
+- **Connection issues:** Restart the Agent session after config changes
 
 ## Notes
 
 - Web-based configuration (edit JSON in browser)
-- Uses `serverUrl` key for HTTP (not `url`)
-- Restart Agent session after config changes
-- See [Antigravity MCP Guide](https://antigravity.codes/blog/antigravity-mcp-tutorial) for details
+- stdio is more reliable than HTTP for this MCP server
+- See [Antigravity MCP Guide](https://antigravity.codes/blog/antigravity-mcp-tutorial) for general MCP setup
