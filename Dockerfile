@@ -23,7 +23,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --locked --no-dev
 
 # --- Runtime stage: clean image without uv ---
-FROM python:3.13-slim-bookworm@sha256:8092ae2ef67061f9db412458dbdce44dbf16748fb3cae5cdbd020f467a9712d0
+FROM python:3.13-slim-bookworm@sha256:a1165e272e578941b84abc79e4ab38a0305cd12803a5c4247979ac7655f4d641
 
 LABEL org.opencontainers.image.title="Home Assistant MCP Server" \
       org.opencontainers.image.description="AI assistant integration for Home Assistant via Model Context Protocol" \
