@@ -23,7 +23,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --locked --no-dev --no-editable
 
 # --- Runtime stage: clean image without uv ---
-FROM python:3.13-slim-bookworm@sha256:8092ae2ef67061f9db412458dbdce44dbf16748fb3cae5cdbd020f467a9712d0
+FROM python:3.15-slim-bookworm@sha256:4d54a654d391909a6c0de8035e15c01ad196d31e4a1552bb328bf1181e4d393a
 
 WORKDIR /app
 
